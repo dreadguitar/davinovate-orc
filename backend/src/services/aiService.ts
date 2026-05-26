@@ -35,11 +35,13 @@ export const generateEmbedding = async (text: string): Promise<number[] | null> 
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${EMBEDDINGS_API_KEY}`,
+        'Connection': 'close', // Prevenir fugas de sockets keep-alive en hosting compartido
       },
       body: JSON.stringify({
         model: EMBEDDINGS_MODEL,
         input: text,
       }),
+      signal: AbortSignal.timeout(15000), // Timeout nativo de 15s para evitar bloqueos
     });
 
     if (!response.ok) {
@@ -66,6 +68,7 @@ export const generateCompletion = async (messages: any[], tools?: any[], tool_ch
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${AI_API_KEY}`,
+      'Connection': 'close', // Prevenir fugas de sockets keep-alive en hosting compartido
     },
     body: JSON.stringify({
       model: AI_MODEL,
@@ -74,6 +77,7 @@ export const generateCompletion = async (messages: any[], tools?: any[], tool_ch
       tool_choice,
       stream,
     }),
+    signal: AbortSignal.timeout(30000), // Timeout nativo de 30s para generación
   });
 
   if (!response.ok) {
@@ -92,7 +96,9 @@ export const getModels = async (): Promise<{ id: string; object: string; created
   const response = await fetch(`${AI_BASE_URL}/models`, {
     headers: {
       'Authorization': `Bearer ${AI_API_KEY}`,
+      'Connection': 'close', // Prevenir fugas de sockets keep-alive
     },
+    signal: AbortSignal.timeout(15000), // Timeout nativo de 15s para evitar cuelgues
   });
 
   if (!response.ok) {

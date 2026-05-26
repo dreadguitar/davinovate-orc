@@ -127,144 +127,155 @@ IMPORTANT RULES FOR VOICE MODE:
         
         const reader = response.body?.getReader();
         if (!reader) throw new Error('No stream available');
-        const decoder = new TextDecoder('utf-8');
 
-        let fullText = '';
-        let sentenceBuffer = '';
-        let detectedLang = state.currentLang;
-        let toolCallsRaw: any = {}; 
-        let isToolCall = false;
+        try {
+            const decoder = new TextDecoder('utf-8');
 
-        while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
+            let fullText = '';
+            let sentenceBuffer = '';
+            let detectedLang = state.currentLang;
+            let toolCallsRaw: any = {}; 
+            let isToolCall = false;
 
-            const chunkStr = decoder.decode(value, { stream: true });
-            const lines = chunkStr.split('\n');
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) break;
 
-            for (const line of lines) {
-                if (line.startsWith('data: ') && line !== 'data: [DONE]') {
-                    try {
-                        const data = JSON.parse(line.slice(6));
-                        const delta = data.choices[0]?.delta;
-                        
-                        if (delta?.tool_calls) {
-                            isToolCall = true;
-                            // Accumulate tool calls
-                            for (const tc of delta.tool_calls) {
-                                if (!toolCallsRaw[tc.index]) toolCallsRaw[tc.index] = { id: tc.id, type: 'function', function: { name: '', arguments: '' } };
-                                if (tc.id) toolCallsRaw[tc.index].id = tc.id;
-                                if (tc.function?.name) toolCallsRaw[tc.index].function.name += tc.function.name;
-                                if (tc.function?.arguments) toolCallsRaw[tc.index].function.arguments += tc.function.arguments;
-                            }
-                        } else if (delta?.content) {
-                            fullText += delta.content;
-                            sentenceBuffer += delta.content;
+                const chunkStr = decoder.decode(value, { stream: true });
+                const lines = chunkStr.split('\n');
+
+                for (const line of lines) {
+                    if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+                        try {
+                            const data = JSON.parse(line.slice(6));
+                            const delta = data.choices[0]?.delta;
                             
-                            // Remove language tags from the buffer seamlessly
-                            let cleanBuffer = sentenceBuffer.replace(/^\[(?:ES|EN)\]\s*/i, '');
-                            
-                            // Tag detection based on the very start of fullText
-                            if (fullText.startsWith('[ES]')) detectedLang = 'es';
-                            else if (fullText.startsWith('[EN]')) detectedLang = 'en';
-                            
-                            // Stream to piper by sentence
-                            const match = cleanBuffer.match(/([^.!?\n]+[.!?\n]+)(.*)/);
-                            if (match) {
-                                const sentence = match[1];
-                                sentenceBuffer = match[2]; // keep the rest
-                                
-                                if (!state.ttsProcess || detectedLang !== state.currentLang) {
-                                    if (state.ttsProcess) state.ttsProcess.kill();
-                                    state.currentLang = detectedLang;
-                                    state.ttsProcess = spawnPiper(state.currentLang);
-                                    state.ttsProcess.stdout.on('data', (c: Buffer) => { if (ws.readyState === 1) ws.send(c); });
-                                    state.ttsProcess.on('error', (err: any) => console.error('[Piper Error]', err));
+                            if (delta?.tool_calls) {
+                                isToolCall = true;
+                                // Accumulate tool calls
+                                for (const tc of delta.tool_calls) {
+                                    if (!toolCallsRaw[tc.index]) toolCallsRaw[tc.index] = { id: tc.id, type: 'function', function: { name: '', arguments: '' } };
+                                    if (tc.id) toolCallsRaw[tc.index].id = tc.id;
+                                    if (tc.function?.name) toolCallsRaw[tc.index].function.name += tc.function.name;
+                                    if (tc.function?.arguments) toolCallsRaw[tc.index].function.arguments += tc.function.arguments;
                                 }
+                            } else if (delta?.content) {
+                                fullText += delta.content;
+                                sentenceBuffer += delta.content;
+                                
+                                // Remove language tags from the buffer seamlessly
+                                let cleanBuffer = sentenceBuffer.replace(/^\[(?:ES|EN)\]\s*/i, '');
+                                
+                                // Tag detection based on the very start of fullText
+                                if (fullText.startsWith('[ES]')) detectedLang = 'es';
+                                else if (fullText.startsWith('[EN]')) detectedLang = 'en';
+                                
+                                // Stream to piper by sentence
+                                const match = cleanBuffer.match(/([^.!?\n]+[.!?\n]+)(.*)/);
+                                if (match) {
+                                    const sentence = match[1];
+                                    sentenceBuffer = match[2]; // keep the rest
+                                    
+                                    if (!state.ttsProcess || detectedLang !== state.currentLang) {
+                                        if (state.ttsProcess) state.ttsProcess.kill();
+                                        state.currentLang = detectedLang;
+                                        state.ttsProcess = spawnPiper(state.currentLang);
+                                        state.ttsProcess.stdout.on('data', (c: Buffer) => { if (ws.readyState === 1) ws.send(c); });
+                                        state.ttsProcess.on('error', (err: any) => console.error('[Piper Error]', err));
+                                    }
 
-                                if (state.ttsProcess) {
-                                    const cleanSentenceForVoice = sentence.replace(/[*_`#]/g, '').trim();
-                                    if (cleanSentenceForVoice) {
-                                        state.ttsProcess.stdin.write(cleanSentenceForVoice + "\n");
+                                    if (state.ttsProcess) {
+                                        const cleanSentenceForVoice = sentence.replace(/[*_`#]/g, '').trim();
+                                        if (cleanSentenceForVoice) {
+                                            state.ttsProcess.stdin.write(cleanSentenceForVoice + "\n");
+                                        }
                                     }
                                 }
                             }
+                        } catch (e) {
+                            // ignore JSON parse errors on partial chunks
                         }
-                    } catch (e) {
-                        // ignore JSON parse errors on partial chunks
                     }
                 }
             }
-        }
 
-        // End of stream handling
-        if (isToolCall) {
-            const tool_calls = Object.values(toolCallsRaw);
-            messages.push({ role: 'assistant', tool_calls });
-            for (const toolCall of tool_calls as any[]) {
-                const functionName = toolCall.function.name;
-                let functionArgs = {};
-                try {
-                    functionArgs = JSON.parse(toolCall.function.arguments || '{}');
-                } catch (err) {
-                    console.error('[Tool Parse Error] Invalid JSON from LLM:', toolCall.function.arguments);
-                    // Add a tool-role error response to keep the message sequence valid (assistant → tool)
+            // End of stream handling
+            if (isToolCall) {
+                const tool_calls = Object.values(toolCallsRaw);
+                messages.push({ role: 'assistant', tool_calls });
+                for (const toolCall of tool_calls as any[]) {
+                    const functionName = toolCall.function.name;
+                    let functionArgs = {};
+                    try {
+                        functionArgs = JSON.parse(toolCall.function.arguments || '{}');
+                    } catch (err) {
+                        console.error('[Tool Parse Error] Invalid JSON from LLM:', toolCall.function.arguments);
+                        // Add a tool-role error response to keep the message sequence valid (assistant → tool)
+                        messages.push({
+                            tool_call_id: toolCall.id,
+                            role: 'tool',
+                            name: functionName,
+                            content: 'Error: Failed to parse tool arguments. The JSON was malformed.'
+                        });
+                        ws.send(JSON.stringify({ type: 'reply', text: state.currentLang === 'es' ? 'Hubo un error procesando tu solicitud, intentando de nuevo...' : 'There was an error processing your request, retrying...', role: 'assistant' }));
+                        continue;
+                    }
+                    
+                    let resultText = '';
+                    if (targetType === 'system') {
+                        const result = await executeTool(functionName, functionArgs, userId);
+                        resultText = JSON.stringify(result.data || result);
+                        // Tell client to update UI
+                        ws.send(JSON.stringify({ type: 'action', action: result.action, target: result.target }));
+                    } else {
+                        try {
+                            const result = await executeSkill(functionName, functionArgs, userId);
+                            resultText = typeof result === 'string' ? result : JSON.stringify(result);
+                        } catch (e: any) {
+                            resultText = `Skill execution failed: ${e.message}`;
+                        }
+                    }
+
                     messages.push({
                         tool_call_id: toolCall.id,
                         role: 'tool',
                         name: functionName,
-                        content: 'Error: Failed to parse tool arguments. The JSON was malformed.'
+                        content: resultText
                     });
-                    ws.send(JSON.stringify({ type: 'reply', text: state.currentLang === 'es' ? 'Hubo un error procesando tu solicitud, intentando de nuevo...' : 'There was an error processing your request, retrying...', role: 'assistant' }));
-                    continue;
+                }
+                turns++;
+            } else {
+                // Flush remaining buffer
+                let cleanBuffer = sentenceBuffer.replace(/^\[(?:ES|EN)\]\s*/i, '');
+                if (cleanBuffer.trim()) {
+                    if (!state.ttsProcess || detectedLang !== state.currentLang) {
+                         if (state.ttsProcess) state.ttsProcess.kill();
+                         state.currentLang = detectedLang;
+                         state.ttsProcess = spawnPiper(state.currentLang);
+                         state.ttsProcess.stdout.on('data', (c: Buffer) => { if (ws.readyState === 1) ws.send(c); });
+                         state.ttsProcess.on('error', (err: any) => console.error('[Piper Error]', err));
+                    }
+                    if (state.ttsProcess) {
+                        const finalCleanBuffer = cleanBuffer.replace(/[*_`#]/g, '').trim();
+                        if (finalCleanBuffer) {
+                            state.ttsProcess.stdin.write(finalCleanBuffer + "\n");
+                        }
+                    }
                 }
                 
-                let resultText = '';
-                if (targetType === 'system') {
-                    const result = await executeTool(functionName, functionArgs, userId);
-                    resultText = JSON.stringify(result.data || result);
-                    // Tell client to update UI
-                    ws.send(JSON.stringify({ type: 'action', action: result.action, target: result.target }));
-                } else {
-                    try {
-                        const result = await executeSkill(functionName, functionArgs, userId);
-                        resultText = typeof result === 'string' ? result : JSON.stringify(result);
-                    } catch (e: any) {
-                        resultText = `Skill execution failed: ${e.message}`;
-                    }
-                }
-
-                messages.push({
-                    tool_call_id: toolCall.id,
-                    role: 'tool',
-                    name: functionName,
-                    content: resultText
-                });
+                messages.push({ role: 'assistant', content: fullText });
+                const textToSpeak = fullText.replace(/^\[(?:ES|EN)\]\s*/i, '').trim();
+                ws.send(JSON.stringify({ type: 'reply', text: textToSpeak, role: 'assistant' }));
+                break;
             }
-            turns++;
-        } else {
-            // Flush remaining buffer
-            let cleanBuffer = sentenceBuffer.replace(/^\[(?:ES|EN)\]\s*/i, '');
-            if (cleanBuffer.trim()) {
-                if (!state.ttsProcess || detectedLang !== state.currentLang) {
-                     if (state.ttsProcess) state.ttsProcess.kill();
-                     state.currentLang = detectedLang;
-                     state.ttsProcess = spawnPiper(state.currentLang);
-                     state.ttsProcess.stdout.on('data', (c: Buffer) => { if (ws.readyState === 1) ws.send(c); });
-                     state.ttsProcess.on('error', (err: any) => console.error('[Piper Error]', err));
-                }
-                if (state.ttsProcess) {
-                    const finalCleanBuffer = cleanBuffer.replace(/[*_`#]/g, '').trim();
-                    if (finalCleanBuffer) {
-                        state.ttsProcess.stdin.write(finalCleanBuffer + "\n");
-                    }
-                }
+        } finally {
+            // Garantizar la liberación del lector y cancelación del cuerpo del stream para cerrar el socket TCP subyacente
+            try {
+                reader.releaseLock();
+                await response.body?.cancel();
+            } catch (err) {
+                // Ignorar fallos de cierre de stream ya cancelados
             }
-            
-            messages.push({ role: 'assistant', content: fullText });
-            const textToSpeak = fullText.replace(/^\[(?:ES|EN)\]\s*/i, '').trim();
-            ws.send(JSON.stringify({ type: 'reply', text: textToSpeak, role: 'assistant' }));
-            break;
         }
     }
   } catch (error: any) {
